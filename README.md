@@ -1,0 +1,2 @@
+# study_01_effect_validation
+効果検証入門の勉強を進めるにあたって作業する場所
