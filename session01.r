@@ -44,3 +44,48 @@ rct_ttest <- t.test(mens_mail, no_mail, var.equal = TRUE)
 # The null hypothesis is rejected because the p-value. Assume there is a significant difference.
 
 # 1.4.3 Verification of Effectiveness with Biased Data ----
+## Creating data with selection bias
+
+# setting
+set.seed(1)
+
+obs_rate_c <- 0.5
+obs_rate_t <- 0.5
+
+# Creating data
+# Delete 50% of data the meets the following criteria
+# * less than 300 purchases in the last year (history < 300)
+# * last purchase was less than 6 (recency < 6)
+# * Multiple contact channels (channel = Multichannel)
+biased_data <- male_df %>%
+  dplyr::mutate(
+    obs_rate_c = if_else(
+      (history > 300) | (recency < 6) | (channel == 'Multichannel'), obs_rate_c, 1),
+    obs_rate_t = if_else(
+      (history > 300) | (recency < 6) | (channel == 'Multichannel'), 1, obs_rate_t),
+    # uniform distribution
+    random_number = runif(n = NROW(male_df))
+    ) %>%
+  # treatment = 0 では5当てはまる50%が選ばれない, treatment = 1 では当てはまらない50%が選ばれない
+  dplyr::filter(
+    (treatment == 0 & random_number < obs_rate_c)
+    | (treatment == 1 & random_number < obs_rate_t)
+  )
+
+summary_by_segment_biased <- biased_data %>%
+  dplyr::group_by(treatment) %>%
+  dplyr::summarise(
+    conversion_rate = mean(conversion),
+    spend_mean = mean(spend),
+    count_n = n()
+  )
+
+mens_mail_biased <- biased_data %>%
+  dplyr::filter(treatment == 1) %>%
+  pull(spend)
+
+no_mail_biased <- biased_data %>%
+  dplyr::filter(treatment == 0) %>%
+  pull(spend)
+
+rct_ttest_biased <- t.test(mens_mail_biased, no_mail_biased, var.equal = TRUE)
