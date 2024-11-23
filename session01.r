@@ -89,3 +89,11 @@ no_mail_biased <- biased_data %>%
   pull(spend)
 
 rct_ttest_biased <- t.test(mens_mail_biased, no_mail_biased, var.equal = TRUE)
+# result: t = 5.6708, p-value = 1.433e-08
+# The null hypothesis is rejected because the p-value. Assume there is a significant difference.
+# (reg.RCT result: t = 5.3001, p-value = 1.163e-07)
+# The p-value is even smaller than without bias, 
+# indicating that the bias the target of the measure widens the difference in means and overestimated.
+
+
+
