@@ -94,6 +94,3 @@ rct_ttest_biased <- t.test(mens_mail_biased, no_mail_biased, var.equal = TRUE)
 # (reg.RCT result: t = 5.3001, p-value = 1.163e-07)
 # The p-value is even smaller than without bias, 
 # indicating that the bias the target of the measure widens the difference in means and overestimated.
-
-
-

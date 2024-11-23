@@ -1,0 +1,62 @@
+# chapter02 介入効果を図るための回帰分析
+
+## 2.1.2 効果分析のための回帰分析
+
+介入効果は施策の有無における結果の期待値の差分 $\tau = E[Y^{(1)}] - E[Y^{0}]$で表される.
+
+この章で登場する３つの変数
+
+-   被説明変数( Y: dependent variable)
+
+    -   効果を確認したい変数. メールの例であれば購買量
+
+-   介入変数(Z: treatment variable)
+
+    -   施策の有無を表す変数. メールの例では配信するか否か
+
+-   共変量(X: control variable)
+
+    -   セレクションバイアスを発生させていると分析者が想定する変数
+
+    -   介入や施策の有無で傾向が異なっていると想定される変数. メールの例なら去年の購買量など
+
+$Y = E[Y|X, Z] + u = \beta_0 + \beta_1X+\beta_2Z + u$ の関係が成り立つ.
+
+$u$ は誤差項で $u_i = Y_i - (\beta_0 + \beta_1X_i + \beta_2Z_i)$ で表される.
+
+## 2.1.3 回帰分析による効果の推定
+
+年齢が上がるにつれて１年分の経験が収入に対して持つ影響が少なくなると仮定したとき\
+その関係は二次関数で表されることが知られているため, 本来の $X$ に加えて $X^2$ を加える必要がある（らしい）\
+ので，それを組み込んだ回帰モデルとする
+
+介入あり: $E[Y|X,Z = 1] = \beta_0 + \beta_1X+\beta_2X^2+\beta_31$\
+介入なし: $E[Y|X,Z = 0] = \beta_0 + \beta_1X+\beta_2X^2+\beta_30$
+
+介入効果は２つの差のため $\beta_3$ だけとなる
+
+## 2.1.5 Rによるメールマーケティングデータの分析（回帰編）
+
+$\text{Spend}_i = \beta_0 + \beta_{treatment}\text{treatment}_i + \beta_{history}\text{history}_i$
+
+変数の意味は次のとおり. Spend: 購入額, treatment: 介入変数, history: 過去の購入額
+
+これをデータフレームに対してRで書くと $send \sim treatment + history$となる
+
+```{r, eval =TRUE}
+library(pacman)  
+pacman::p_load(
+  tidyverse,
+  readr
+  )
+
+biased_data <- readr::read_csv('./biased_data.cvs')
+```
+
+回帰分析の実行
+
+```{r}
+biased_reg <- lm(data = biased_data,
+                 formula = spend ~ treatment + history)
+summary(biased_reg)
+```
