@@ -60,3 +60,23 @@ biased_reg <- lm(data = biased_data,
                  formula = spend ~ treatment + history)
 summary(biased_reg)
 ```
+
+注目するのは Coefficients の部分\
+推定されたパラメータの値 (Estimate) とその標準偏差 (Std. Error) やt検定の結果 (t value, Pr \> \|t\|) がある
+
+この結果では以下のように出ている
+
+$\beta_0$ (Intercept) = 0.3242, $\beta_{treatment}$ (treatment) = 0.9026, $\beta_{history}$ (history) = 0.001
+
+介入効果 (treatment) は Pr(t) = 2.25e-07 ととても小さいので有意であり帰無仮説「メールの送信に効果はない」を棄却できる．また Estimate が0.90であることから，メールを送信することで平均0.9ほど増加すると解釈可能
+
+効果検証での回帰分析では Coefficients 以外の情報を気にしないため，この本でも今後は Coefficients のみ表示されるようにする\
+`broom::tidy()` は `lm()` で出力される結果をデータフレームに変換してくれる
+
+```{r}
+# 今後は冒頭にpacman::p_load で一緒に入れとく
+library(broom)
+# 結果を tidy() に渡せばok
+biased_reg_coef <- broom::tidy(biased_reg)
+biased_reg_coef
+```
