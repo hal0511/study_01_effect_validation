@@ -94,3 +94,64 @@ $\beta_{treatment}$ 以外の推定値も得られるけども，効果検証の
 前述の通り，ここで作る回帰式は効果検証以外の目的を持たない．（予測結果の担保をしない）
 
 ## 2.2 回帰分析におけるバイアス
+
+### 2.2.1 共変量の追加による効果
+
+セレクションバイアスが小さくなるような推定を行うためには共変量の選択が重要\
+まずは，共変量とセレクションバイアスの関係性について理解する
+
+```{r}
+# ---- library ----
+# 同じセッションであれば再度ロードする必要はないけど，何となく書きたい
+library(pacman)
+pacman::p_load(
+  tidyverse,
+  readr,
+  broom
+)
+
+# Single regression on RCT data
+rct_reg <- lm(data = male_df, formula = spend ~ treatment)
+rct_reg_coef <- broom::tidy(rct_reg)
+
+# Single regression on Biased data
+biased_reg <- lm(data = biased_data, formula = spend ~ treatment)
+biased_reg_coef <- broom::tidy(biased_reg)
+
+print(rct_reg_coef)
+print(biased_reg_coef)
+```
+
+結果はこちら⇩
+
+| RCT data  |  Estimate | std.error | statistic |      p.value |
+|:---------:|----------:|----------:|----------:|-------------:|
+| treatment | 0.7698272 | 0.1452479 |  5.300090 | 1.163201e-07 |
+
+| Biased data |  Estimate | std.error | statistic |      p.value |
+|:-----------:|----------:|----------:|----------:|-------------:|
+|  treatment  | 0.9794465 |  0.172717 |  5.670817 | 1.433467e-08 |
+
+Chapter01のsummary_by_segmentで出した試作有無での平均値の差は0.767 (= 介入効果）であり，RCTの結果のEstimate(0.7698) とかなり近いことが見てとれる．一方バイアスを作ったデータでは0.979と過剰に評価（推定）されていることが見てとれる.
+
+次にバイアス軽減を目的として共変量を加えた以下のモデルを作る\
+共変量はバイアスを作るときに使った recency, history, channelの３つ
+
+$$
+\begin{align}
+Spend_i &= \beta_0 + \beta_{treatment}\text{treatment}_i \\
+&+ \beta_{recency}\text{recency}_i + \beta_{channel}\text{channel}_i + \beta_{history}\text{history}_i + u_i
+\end{align}
+$$
+
+```{r}
+nonrct_mreg <- lm(data = biased_data,
+                  formula = spend ~ treatment + recency + channel + history)
+nonrct_mreg_coef <- broom::tidy(nonrct_mreg)
+
+print(nonrct_mreg_coef)
+```
+
+treatmentのEstimateを見ると0.847で0.767に近づいたことから，共変量を組み込むことでバイアスの低減に役に立つことがわかった
+
+### 2.2.2 脱落変数バイアス(OVB)
