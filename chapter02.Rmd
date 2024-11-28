@@ -198,3 +198,103 @@ $\gamma_1$ は $X_{omit, i} = \gamma_1Z_i+\epsilon_i$ と表すように$Z_i$ �
 なので，効果分析において本当に興味のあるパラメータ以外の有意差検定の数字を見て共変量を取捨選択することは害悪にすらなり得る
 
 ### 2.2.3 RによるOVBの確認
+
+$$
+\begin{align}
+\text{Spend}_i &= \alpha_0 + \alpha_1\text{treatment}_i + \alpha_2\text{recency}_i + \alpha_3\text{channel}_i + e_i &\text{(model A)}\\
+\text{Spend}_i &= \beta_0 + \beta_1\text{treatment}_i + \beta_2\text{recency}_i + \beta_3\text{channel}_i + \beta_4\text{history}_i + u_i &\text{(model B)}
+\end{align}
+$$
+
+AとBは共変量 history が含まれるか否かとなる．history は過去の購入額を表す変数なので，売上に対して相関を持つ．また，バイアス加工したデータにおいて，historyが300以上の場合には介入が起こりやすくなるようにし，バイアス加工したデータにおいては historyを外すことで脱落バイアスが発生するように作っている.
+
+OVBは $\alpha_1 - \beta_1 = \gamma_1 \beta_1$ なので,\
+$\gamma_1$ はモデルAで脱落している history に対してモデルA に含まれている変数で行う回帰式で推定された値となる
+
+$$
+\text{history}_i = \gamma_0 + \gamma_1\text{treatment}_i + \gamma_2\text{recency}_i + \gamma_3\text{channel}_i + \epsilon_i \ \text{(model C)}
+$$
+
+では，モデルを作っていく
+
+```{r}
+# broom は複数の回帰式をまとめて処理できるの
+# モデル式のベクトルを用意して
+formula_vec <- c(spend ~ treatment + recency + channel,
+                 spend ~ treatment + recency + channel + history,
+                 history ~ treatment + channel + recency)
+
+# formla に名前をつける, names は要素に名前をつけることができる．辞書みたい
+# LETTERSはA~Zが入っているベクトルオブジェクト, [1:3]でA, B, Cが取り出せる
+# pasteはconcatみたいなやつ．区切りを指定できる
+names(formula_vec) <- paste('reg', LETTERS[1:3], sep = '_')
+
+# enframeでtibbleに変換, value = formulaで渡せるんだ，リストで渡さなくていいのか便利
+models <- formula_vec %>% 
+  tibble::enframe(name = 'model_index', value = 'formula')
+
+# mapを使って各回帰式を実行
+# mapは.xでカラム指定, .f で指定したカラムに与えた関数を実行, 引数のdataでlmに使うデータを指定
+# そのモデル結果に対してmapでtidy()を実行
+df_models <- models %>%
+  mutate(
+    model = map(.x = formula, .f = lm, data = biased_data)
+  ) %>%
+  mutate(
+    lm_result = map(.x = model, .f = tidy)
+  )
+
+# df_modelsはtibbleにtibbleが入っている状態なので，そのままだと結果が見れない
+# なので整形する
+df_results <- df_models %>%
+  mutate(
+    formula = as.character(formula)
+  ) %>%
+  select(
+    formula, model_index, lm_result
+  ) %>%
+  unnest(
+    cols = c(lm_result)
+  )
+
+# df_resultsはunnestされた状態なので縦持ち．見えるけど，かったるい
+# df_results
+```
+
+欲しいのは脱落バイアスの２つの表現方法（右辺と左辺）である $\alpha_1 - \beta_1$ と $\gamma_1\beta_4$\
+$\alpha_1, \beta_1, \gamma_1$ は treatmentのパラメータなので `filter(term == treatment)`で取り出せる\
+$\beta_4$ はモデルBのhistoryのパラメータなので `filter(model_index == 'reg_B' and term == 'history')`
+
+```{r}
+# treatmentのベクトルを取り出す
+treatment_coef <- df_results %>%
+  dplyr::filter(
+    term == 'treatment'
+  ) %>%
+  pull(
+    estimate
+  )
+
+# historyを取り出す
+history_coef <- df_results %>%
+  dplyr::filter(
+    model_index == 'reg_B',
+    term == 'history'
+  ) %>%
+  pull(
+    estimate
+  )
+
+# a1 - b1
+coef_gap <- treatment_coef[1] - treatment_coef[2]
+# beta2 * gamma1
+OVB <- history_coef * treatment_coef[3]
+
+coef_gap # 0.02805398
+OVB # 0.02805398
+# ちゃんと一致した
+```
+
+$\alpha_1 - \beta_1 = \gamma_1 \beta_1$ が綺麗に出たので，共変量を追加することでOVBが消失することであることに由来するとわかる
+
+### 2.2.4 OVBが与えてくれる情報
