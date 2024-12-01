@@ -53,6 +53,11 @@ pacman::p_load(
   )
 
 biased_data <- readr::read_csv('./biased_data.cvs')
+male_df <- readr::read_csv('./sample_marketing_data.csv') %>%
+  dplyr::filter(segment != 'Womens E-Mail') %>%
+  dplyr::mutate(
+    treatment = if_else(segment == 'Mens E-Mail', 1, 0)
+  )
 ```
 
 回帰分析の実行
