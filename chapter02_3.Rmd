@@ -1,0 +1,23 @@
+## 2.3 回帰分析を利用した探索的な効果検証
+
+ここからは回帰分析を用いてどのように効果検証が行われたか Angrist et al. (2002) を例に
+
+```{r}
+# 最初の読み込み
+# remotes::install_github('itamarcaspi/experimentdatar')
+
+library(pacman)
+pacman::p_load(
+  experimentdatar,
+  broom,
+  tidyverse,
+  readr
+  )
+# 最初だけ, ローカルに保存したから後から使う時はもうok
+# data("vouchers")
+# readr::write_csv(vouchers, './vouchers.csv')
+```
+
+ではここから論文内容の一部を再現 & プロセスと考え方を追体験
+
+### 2.3.1 PACESによる学費の割引券配布の概要
