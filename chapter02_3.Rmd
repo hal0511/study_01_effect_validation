@@ -16,6 +16,7 @@ pacman::p_load(
 # 最初だけ, ローカルに保存したから後から使う時はもうok
 # data("vouchers")
 # readr::write_csv(vouchers, './vouchers.csv')
+vouchers_df <- readr::read_csv('./vouchers.csv')
 ```
 
 ではここから論文内容の一部を再現 & プロセスと考え方を追体験
