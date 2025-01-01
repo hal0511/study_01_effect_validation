@@ -1,5 +1,9 @@
 Version: 1.0
+<<<<<<< HEAD
 ProjectId: 5e7ad03a-feac-4bfc-a6d2-2f73e8e4c894
+=======
+ProjectId: 36241ad7-4fce-4a8e-9565-08baf88a1c84
+>>>>>>> 02a5797 (傾向スコアについて3.2まで)
 
 RestoreWorkspace: Default
 SaveWorkspace: Default
