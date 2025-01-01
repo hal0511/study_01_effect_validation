@@ -1,4 +1,4 @@
-# 傾向スコア
+# 傾向スコア(Propensity Score, PS)
 
 ## 3.1 傾向スコアの仕組み
 
@@ -211,3 +211,151 @@ cobalt::love.plot(weighting, thresholds = 0.1)
 マッチングでATTの推定を行う場合はZ=1となるそれぞれのサンプルに対して、それに似ているZ=0のサンプルが選ばれてマッチングされる。この時、Z=0の選ばれなかったデータは捨てられることになる。なので結果は、元データでZ=1になるポテンシャルがあったデータに絞り込まれたサンプルでの平均的な効果ということになる。
 
 IPWは重みづけなので、得られたデータ全てを使用して期待値を推定する。なので、仮にRCTしていたらどんな結果になっていたかを推定していることに等しい。(つまりATEの推定)
+
+## 3.3 機械学習を利用したメールマーケティング施策の効果検証
+
+介入対象の選定方法を自動的に決定している場合は、入手できるログデータに介入の割りふり確率（＝傾向スコア）が残されている場合がある。\
+もし、傾向スコアのログデータがなくても、介入を決定する仕組みの正確な情報が残されていることは多い。\
+これらの場合は傾向スコアを用いた分析がやりやすくなる\
+そんなことを想定したシミュレーション
+
+### 3.3.1 データの作成
+
+```{R}
+set.seed(1)
+
+library(pacman)  
+pacman::p_load(
+  tidyverse,
+  readr,
+  broom,
+  stats
+  )
+
+# load data
+email_data <- readr::read_csv("http://www.minethatdata.com/Kevin_Hillstrom_MineThatData_E-MailAnalytics_DataMiningChallenge_2008.03.20.csv")
+
+male_df <- email_data %>%
+  dplyr::filter(segment != 'Womens E-Mail') %>%
+  dplyr::mutate(
+    treatment = if_else(segment == 'Mens E-Mail', 1, 0)
+  )
+
+# 男性データをランダムに２つに分割
+# sample(x, size)なので行数を行数の半分だけ抽出
+train_flg <- sample(NROW(male_df), NROW(male_df)/2, replace = FALSE)
+
+# train_flgをつけたデータのうち, メールが配信されていないデータを抽出
+male_df_train <- male_df[train_flg, ] %>%
+  dplyr::filter(treatment == 0)
+
+# train_flgに含まれない行を抽出
+male_df_test <- male_df[-train_flg, ]
+
+# 売上が発生する確率を予測するモデルの作成
+prediction_model <- stats::glm(data = male_df_train, 
+                               formula = conversion ~ recency + history_segment + channel + zip_code, 
+                               family = binomial)
+```
+
+prediction_modelはメールが配信されていないデータを学習させているため、メールが配信されていない場合に売上が発生する確率を予測できる。\
+予測値のパーセントランクを算出し、サンプルの予測値の大きさが下から何%に当たるのかだす\
+この値を介入が起きる確率として扱い、介入を割り振る。介入の割り振り方はパーセントランク値と二項分布に従った乱数によって決定させる
+
+```{R}
+# 作ったモデルを用いてmale_df_testに対して配信確率をつける
+pred_cv <- stats::predict(prediction_model, 
+                          newdata = male_df_test, 
+                          type = 'response')
+
+# 配信確率のパーセントランク値を作る
+pred_cv_rank <- dplyr::percent_rank(pred_cv)
+
+# 配信確率をもとにメールの配信を決定させる
+mail_assign <- sapply(pred_cv_rank, stats::rbinom, n = 1, size = 1)
+
+# 配信
+ml_male_df <- male_df_test %>%
+  mutate(
+    mail_assign = mail_assign,
+    ps = pred_cv_rank
+  ) %>%
+  dplyr::filter(
+    (treatment == 1 & mail_assign == 1) |
+      (treatment ==0 & mail_assign == 0)
+  )
+```
+
+これでセレクションバイアスの入ったサンプルデータの作成終わり\
+メール配信されていない時期のデータに基づいて売り上げを発生させそうなユーザーを予測し、そのようなユーザーに重点的にメールを配信した内容になっている
+
+### 3.3.2 RCTと平均を比較
+
+ちゃんとバイアスがかかっているか確認するために、ランダムにメールを配信した場合に得られる分析結果を見てみる
+
+```{R}
+# RCTの方
+rct_male_lm <- lm(data = male_df_test, 
+                  formula = spend ~ treatment) %>%
+  broom::tidy()
+
+print(rct_male_lm)
+```
+
+```{R}
+# 操作した方
+ml_male_lm <- lm(data = ml_male_df, 
+                 formula = spend ~ treatment) %>%
+  broom::tidy()
+
+print(ml_male_lm)
+```
+
+treatmentのestimateを見ると0.76と1.13で結構上振れている結果になっているので、セレクションバイアスによって効果が過剰評価されていることが確認できる
+
+### 3.3.3 傾向スコアを用いた分析
+
+パーセントランクが介入を決定させていた（＝傾向スコア）なので、分析でもこれを使ってマッチングを行う
+
+```{R}
+# すでにある傾向スコアを利用してマッチングを行うためのライブラリ
+library(Matching)
+
+# Y(目的変数), Tr(介入変数), X(傾向スコアのデータ), estimand(Estimateで何を表すか)
+PSM_result <- Matching::Match(Y = ml_male_df$spend,
+                              Tr = ml_male_df$treatment, 
+                              X = ml_male_df$ps,
+                              estimand = 'ATT')
+summary(PSM_result)
+```
+
+ATTは1.19であるがp_valueが0.1と大きいのでちょっと気をつけたほうがいい、効果があるとは言えない。
+
+```{R}
+# IPWでやってみる
+W_out <- WeightIt::weightit(formula = treatment ~ recency + history_segment + channel + zip_code,
+                            data = ml_male_df,
+                            ps = ml_male_df$ps,
+                            estimand = 'ATE')
+
+# 重みづけしたデーアでの共変量のバランスを確認
+cobalt::love.plot(W_out, thresholds = 0.1)
+```
+
+すんごくバランスが良くなっちる
+
+```{R}
+IPW_result <- ml_male_df %>%
+  lm(data = .,
+     formula = spend ~ treatment,
+     weights = W_out$weights) %>%
+  broom::tidy()
+
+print(IPW_result)
+```
+
+0.88となった。p_value \< 0.01なので、こっちの結果は参考にしても良さそう\
+RCTの結果とも近いのできちんとセレクションバイアスを軽減できていることが見てとれる
+
+注意点として、メール配信の意思決定にランダム性がないケースは往々にして存在する。\
+予測値が一定以上の場合にはメールを送信するような状況とか。ここで紹介されていた方法では傾向スコアは1or0の値としていたので、おんなじ方法を取ることはできない。その時は**回帰不連続デザイン(Regression Discontinuity Design; RDD)**を利用する
