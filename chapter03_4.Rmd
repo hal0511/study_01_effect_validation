@@ -1,0 +1,193 @@
+# LaLondeデータセットの分析
+
+## 3.4.1 導入
+
+RCTによる実験結果を因果推論の方法を用いて再現することはどの程度できるのか\
+1970年代に行われた失業者への実験データ(National Supported Works; NSW)を利用し、計量経済学で用いられる方法がどの程度実験の結果に近づけるのかを検証したLaLonde(1986)の紹介
+
+NSWは労働市場へ参加できないような人々に、カウンセリングと9\~18ヶ月の短期的な就労経験を与える事で就職を助ける仕組み。職業訓練と違うのは、NSWは条件を満たす希望者からランダムに人を選んで介入を行う点にある。
+
+LaLonde(1986)は計量経済学で利用される手法を評価するために, NSWの実験で得たデータの非介入グループを削除し、実験の外で得られたCPS(Current population Survey)という調査データを代わりに挿入したデータセットを作成した。(CPSはセレクションバイアスを持つ、またCPSは失業者に限らない)
+
+作成データについて、介入グループは失業者、非介入グループは失業者以外からもデータを得ているため所得平均が "介入\<非介入" となることがセレクションバイアスを生む原因となる
+
+```{R}
+library(pacman)
+pacman::p_load('tidyverse',
+               'haven',
+               'broom',
+               'MatchIt',
+               'WeightIt',
+               'cobalt')
+
+# NBER archiveからデータを読み込む
+cps1_data <- read_dta("https://users.nber.org/~rdehejia/data/cps_controls.dta")
+cps3_data <- read_dta("https://users.nber.org/~rdehejia/data/cps_controls3.dta")
+nswdw_data <- read_dta("https://users.nber.org/~rdehejia/data/nsw_dw.dta")
+
+# NSWデータから介入グループだけ取り出してCPS1における介入グループとして扱う
+# rbindとdplyr::bind_rowsはほぼ同じ
+cps1_nsw_data <- nswdw_data %>%
+  dplyr::filter(treat == 1) %>%
+  rbind(cps1_data)
+
+# NSWデータから介入グループだけ取り出してCPS3における介入グループとして扱う
+cps3_nsw_data <- nswdw_data %>%
+  dplyr::filter(treat == 1) %>%
+  rbind(cps3_data)
+```
+
+nswdw_data: 一定の条件を持つ人を対象に行われたRCTのデータ\
+cps1_nsw_data: NSWの介入が行われたデータと別の調査データ(CPS)を非介入グループとして組み合わせた\
+cps3_nsw_data: 同上。ただしCPS1から特定の条件を満たさないサンプルを除いたのがCPS3
+
+## 3.4.2 RCTによる結果の確認
+
+NSWのデータで職業訓練の収入に対する効果を推定
+
+$$
+\begin{align}
+eran_{78, i} = \beta_0 &+ \beta_1 treatment_i + \beta_2 earn_{47, i} + \beta_3 earn_{75, i} \\
+ &+ \beta_4 age_i + \beta_5 education_i + \beta_6 black_i + \beta_7 hispanic_i \\ 
+ &+ \beta_8 nodegree_i + \beta_9 marridied_i + u_i
+\end{align}
+$$
+
+| 変数名          | 説明           |
+|-----------------|----------------|
+| earn            | ある年の年収   |
+| age             | 年齢           |
+| education       | 学歴           |
+| black, hispanic | 人種           |
+| nodegree        | 学位がないか   |
+| married         | 結婚しているか |
+
+```{R}
+nsw_cov <- nswdw_data %>%
+  lm(
+    data = .,
+    formula = re78 ~ treat + re74 + re75 + age + education + black + hispanic + nodegree + married
+  ) %>%
+  broom::tidy() %>%
+  dplyr::filter(term == 'treat') # 興味あるのはtreatだけ
+
+print(nsw_cov)
+```
+
+p_value \< 0.01 で\$1676の効果が優位に推定された
+
+## 3.4.3 CPSについて回帰分析による効果推定
+
+```{R}
+# CPS1
+cps1_reg <- cps1_nsw_data %>%
+  lm(
+    data = .,
+    formula = re78 ~ treat + re74 + re75 + age + education + black + hispanic + nodegree + married
+  ) %>%
+  broom::tidy() %>%
+  dplyr::filter(term == 'treat')
+
+# CPS3
+cps3_reg <- cps3_nsw_data %>%
+  lm(
+    data = .,
+    formula = re78 ~ treat + re74 + re75 + age + education + black + hispanic + nodegree + married
+  ) %>%
+  broom::tidy() %>%
+  dplyr::filter(term == 'treat')
+```
+
+(これtibbleで一気に書けるやつだ、書き直しチャレンジしよう)
+
+CPS1の結果, treatが\$699でp_value\>0.2. ダメダメ
+
+```{R}
+print(cps1_reg)
+```
+
+CPS3の結果, treatが\$1548でp_value\<0.05. こっちはok
+
+```{R}
+print(cps3_reg)
+```
+
+CPS1の結果は導入で書いてあるように介入グループとして組み合わせたNSWとの性質の違いがセレクションバイアスをバイアスを生んでいることにある。（NSWのデータはCPSに比べて平均的に年収も年齢も低い）\
+そもそも、対象が違うので推定している効果がNSWとCPSでは異なる。
+
+CPS3はCPSのうち1976年春時点で雇用されていないと回答しているサンプルに非介入グループを限定したデータセットとなる。そのため、CPS内で職業訓練の必要性が低いようなサンプルが取り除かれるためNSWに構成が近づいたことが、結果が有意でありかつNSWのRCTの結果と近くなった要因となる。（アドホックな処理のため汎用はできない）
+
+## 3.4.4 傾向スコアによる効果の推定
+
+傾向スコアマッチングを利用して介入グループであるNSWのデータに近いCPSのサンプルを抜き出してマッチングさせ効果検証を行う。
+
+-   I() は formulaで階乗を正しく認識させるため ([RのI関数について](https://hadadada00.hatenablog.com/entry/2019/06/03/001006%3E))
+
+-   給料系は上がり方が一定でない（分布が線形でない）ので２乗して渡すほうがうまくいくことがある
+
+```{R}
+m_near <- MatchIt::matchit(
+  formula = treat ~ age + education + black + hispanic + nodegree + married +
+    re74 + re75 + I(re74^2) + I(re75^2),
+  data = cps1_nsw_data,
+  method = 'nearest'
+)
+
+# 共変量のバランスを確認
+cobalt::love.plot(m_near, thresholds = 0.1)
+```
+
+調整済みのバランスはいい感じ
+
+```{R}
+# データのマッチング
+matched_data <- MatchIt::match.data(m_near)
+
+# マッチング後のデータで効果の推定
+PSM_result_cps1 <- matched_data %>%
+  lm(re78 ~ treat, data = .) %>%
+  broom::tidy()
+
+print(PSM_result_cps1)
+```
+
+マッチング後の効果推定はp_value\<0.01で\$1867となり有意でありかつ、NSWのRCTの結果と近くなった
+
+ではIPWでもやってみる\
+こっちはデータの脱落がないのでCPSのデータも混ざっている状態となる。つまりNSWの結果とは遠くなるはず
+
+```{R}
+weighting <- WeightIt::weightit(
+  formula = treat ~ age + education + black + hispanic + nodegree + married +
+    re74 + re75 + I(re74^2) + I(re75^2),
+  data = cps1_nsw_data,
+  method = 'ps',
+  estimand = 'ATE'
+)
+
+# バランスの確認
+cobalt::love.plot(weighting, thresholds = 0.1)
+```
+
+ほとんどが ±0.1に収まっていない。全部使うと残念結果になるだろう
+
+```{R}
+IPW_result_cps1 <- cps1_nsw_data %>%
+  lm(
+    data = .,
+    formula = re78 ~ treat,
+    weights = weighting$weights
+  ) %>%
+  broom::tidy()
+
+print(IPW_result_cps1)
+```
+
+\$-7627となった, p_value\<0.01なので統計的には有意.\
+もし、共変量のバランスを確認しておらず、IPWでの検証しかしていなければ職業訓練に負の影響があると結論づけてしまいそう。
+
+介入グループと非介入グループの傾向に大きな差がある場合はIPWを用いた分析結果は信用に欠けることが知られているらしい。これは、傾向スコアをサンプルの重みとして使用する特性上、傾向スコアが非常に小さい値を取るとサンプルの重みが大きくなる（逆数を取るため、傾向スコアの値が0.001なら1000倍に水増しされる）
+
+今回のデータの場合はCPSにしか含まれないようなサンプル（職業訓練を必要としない、そもそもの収入が大きい人）の影響を受けている。そのような介入/非介入のみにしか含まれないサンプルがある場合は傾向スコアは0/1に近い値を取ることになる。これは共変量バランスのre系からも見てとれる。
+
+推定したい効果がどのようなサンプルにおける効果なのか十分に配慮しないと、どのモデルが信用にたり得るかを判断することが非常に難しい。ので、分析の際はその対象やデータの発生プロセスに興味関心を持ちましょうとのこと
