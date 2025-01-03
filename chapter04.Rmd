@@ -1,0 +1,302 @@
+# 差分の差分法(DID)とCausalImpact
+
+ある時期から介入を始めて、その開始時期の前後の比較で効果を考える分析方法\
+回帰分析を利用した差分の差分法(Difference In Difference; DID)と、その拡張版にあたるCausalImpactの解説
+
+## 4.1 DID
+
+### 4.1.1 DIDが必要になる状況
+
+介入/非介入グループの両方に同じような特徴を持つサンプルが含まれていれば回帰分析や傾向スコアを使えばいい\
+ただ、実際の施策結果のデータにおいては同質のデータが両方に含まれるのは稀なため、別の方法をとる必要がある
+
+例えばある地域では割引をしてみるなどでは、そもそも地域特性があるので同質とは言えない\
+DIDでは介入が行われた前後データに加え、非介入の前後データを利用することでその問題を乗り越える方法
+
+### 4.1.2 集計による効果検証とその欠点
+
+よく行われる単純な効果検証2つ
+
+1.  介入を受けた地域と受けなかった地域で売上を比較する
+2.  同じ地域の値下げ前と値下げ後の売上データを比較する（前後比較と呼ばれる）
+
+それぞれの問題として、1は地域と介入が完全に相関してしまう問題がある。つまり介入以外に地域固有の差を含んだままの効果検証となる。2は地域によるバイアスは無くなっているが、時間を通したバイアスは存在している（物価や季節性の変動など）\
+なので、この２つを組み合わせてDIDとする
+
+### 4.1.3 DIDのアイデアを用いた集計分析
+
+コレラの感染源を探ったJohn Snowの分析を例として紹介（感染源が空気にあるのか水にあるのか）
+
+Southwark and Vauxhall社とLambeth社の2つの会社が供給している2つの地域があり、1849年においてはどちらもテムズ川を水源としていた。Lambeth社はその後1852年により汚染が少ないと考えられる上流に水源を移した。
+
+|        共有会社        | コレラによる死者 (1849) | コレラによる死者 (1854) |
+|:----------------------:|------------------------:|------------------------:|
+| Southwark and Vauxhall |                   2,261 |                   2,458 |
+|        Lambeth         |                     162 |                      37 |
+
+SVは1849→1854にかけて増加しており、そもそもの契約世帯数が違うがLambethは減少している。水源の変化が死者を減らす効果があったことを示唆している。
+
+非介入グループの変化と介入グループが仮に介入を受けていなかった場合の変化が一致するだろうという仮説を平行トレンド仮説と呼ぶ。この例の場合は「もし、水源を変えていなければSV同様に死者が増加するだろう」となる
+
+$$
+\begin{align}
+Y_{1854, treat} &= Time_{1854} + Area_{treat} + \tau \\
+Y_{1849, treat} &= Time_{1849} + Area_{treat} \\
+Y_{1854, control} &= Time_{1854} + Area_{control} \\
+Y_{1849, control} &= Time_{1849} + Area_{control}
+\end{align}
+$$
+
+$\tau$ は水源が変化した効果(介入効果)であり、介入があった1854年の介入グループにのみ登場する。これを求めるには
+
+$$
+\tau = (Y_{1854, treat} - Y_{1849, treat}) - (Y_{1854, control} - Y_{1849, control})
+$$
+
+なるほど、差分の差分。
+
+```{R}
+# (1) tidyverseとbroomの読み込み
+library("tidyverse")
+library("broom")
+
+# (2) John Snowデータの読み込み
+## Data from Table.12 in Snow(1855)
+## http://www.ph.ucla.edu/epi/snow/table12a.html
+
+## 1849年におけるエリア毎のコレラによる死者数
+### Southwark and Vauxhall Company
+sv1849 <- c(283, 157, 192, 249, 259, 226, 352, 97, 111, 8, 235, 92)
+
+### Lambeth Company & Southwark and Vauxhall Company
+lsv1849 <- c(256, 267, 312, 257, 318, 446, 143, 193, 243, 215, 544, 187, 153, 81, 113, 176)
+
+## 1849年におけるエリア毎のコレラによる死者数
+### Southwark and Vauxhall Company
+sv1854 <- c(371, 161, 148, 362, 244, 237, 282, 59, 171, 9, 240, 174)
+
+### Lambeth Company & Southwark and Vauxhall Company
+lsv1854 <- c(113, 174, 270, 93, 210, 388, 92, 58, 117, 49, 193, 303, 142, 48, 165, 132)
+
+## コレラの死者数を会社ごとにまとめる
+sv_death <- c(sv1849, sv1854)
+lsv_death <- c(lsv1849, lsv1854)
+
+## どのデータがどのエリアのものか
+sv_area <- paste0("sv_", c(1:length(sv1849), 1:length(sv1854)))
+lsv_area <- paste0("lsv_", c(1:length(lsv1849), 1:length(lsv1854)))
+
+## どのデータがどの年のものか
+sv_year <- c(rep("1849", length(sv1849)), rep("1854", length(sv1854)))
+lsv_year <- c(rep("1849", length(lsv1849)), rep("1854", length(lsv1854)))
+
+## Southwark & Vauxhallのデータフレームを作成
+sv <- data.frame(area = sv_area,
+                 year = sv_year,
+                 death = sv_death,
+                 LSV = "0",
+                 company = "Southwark and Vauxhall")
+
+## Lambeth & Southwark and Vauxhallのデータフレームを作成
+lsv <- data.frame(area = lsv_area,
+                  year = lsv_year,
+                  death = lsv_death,
+                  LSV = "1",
+                  company = "Lambeth & Southwark and Vauxhall")
+
+## 地域・年別のデータセットの作成
+JS_df <- rbind(sv, lsv) %>%
+  mutate(LSV =
+           if_else(company == "Lambeth & Southwark and Vauxhall", 1, 0))
+
+## 会社別のデータセットを作成
+JS_sum <- JS_df %>%
+  group_by(company, LSV, year) %>%
+  summarise(death = sum(death))
+
+# (3) 集計と可視化による分析
+## 集計による推定
+JS_grp_summary <- JS_sum %>%
+  mutate(year = paste("year", year, sep = "_")) %>%
+  spread(year, death) %>%
+  mutate(gap = year_1854 - year_1849,
+         gap_rate = year_1854/year_1849 - 1)
+
+## 集計による推定(log)
+JS_grp_summary_ln <- JS_sum %>%
+  mutate(year = paste("year", year, sep = "_"),
+         death = log(death)) %>%
+  spread(year, death) %>%
+  mutate(gap = year_1854 - year_1849)
+
+## ggplotによる可視化
+did_plot <- JS_sum %>%
+  ggplot(aes(y = death, x = year, shape = company)) +
+  geom_point(size = 2) +
+  geom_line(aes(group = company), linetype = 1) +
+  ylim(2000, 4250) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position = "bottom",
+        plot.margin = margin(1, 1, 1, 1, "cm"))
+
+## ggplotによる可視化(アノテーションを追加)
+did_plot +
+  annotate("text", x = 2.2, y = 2400, label = "(1)") +
+  annotate("text", x = 2.2, y = 3904 + 197*0.6, label = "(2)") +
+  annotate("text", x = 2.2, y = 3300, label = "(3)") +
+  annotate("segment", # for common trend in treatment group
+           x = 1, xend = 2,
+           y = 3904, yend = 3904 + 197,
+           arrow = arrow(length = unit(.2,"cm")),
+           size = 0.1,
+           linetype = 2) +
+  annotate("segment", # for parallel trend
+           x = 1, xend = 2,
+           y = 2261, yend = 2261,
+           size = 0.1,
+           linetype = 2) +
+  annotate("segment", # for parallel trend
+           x = 1, xend = 2,
+           y = 3904, yend = 3904,
+           size = 0.1,
+           linetype = 2) +
+  annotate("segment", # for (1)
+           x = 2.07, xend = 2.07,
+           y = 2261, yend = 2458,
+           arrow = arrow(ends = "both",
+                         length = unit(.1,"cm"),angle = 90)) +
+  annotate("segment", # for (2)
+           x = 2.07, xend = 2.07,
+           y = 3904, yend = 3904 + 197,
+           arrow = arrow(ends = "both",
+                         length = unit(.1,"cm"),angle = 90)) +
+  annotate("segment", # for (3)
+           x = 2.07, xend = 2.07,
+           y = 3904, yend = 2547,
+           arrow = arrow(ends = "both",
+                         length = unit(.1,"cm"),angle = 90))
+```
+
+```{R}
+print(JS_grp_summary)
+```
+
+効果は (-1357) - 197 で-1554 または-43% (時間による効果であるので、この場合は比率で表す方が適当）
+
+### 4.1.4 回帰分析を利用したDID
+
+DIDは回帰分析のフレームワークに当てはめられる\
+DIDで扱うデータは同一対象から別の期間で得られたものを使えばok. この例においてエリアの数や期間の長さを特に限定しない. 回帰モデルは以下のもの
+
+$$
+Y_i = \beta_0 + \beta_1 LSV_i + \beta_2 D54_i + \beta_3 LSV_i \times D54_i + u_i
+$$
+
+$LSV$ は両方の会社が水を供給している地域であることを、$D54$ は1854年のデータであること。それらを掛け合わせた $LSV \times D54$ の3つの変数とそれぞれのパラメータと誤差項がある。そこにかかっている $\beta_3$ が興味のあるパラメータとなる。
+
+```{R}
+JS_did <- JS_sum %>%
+  mutate(D1854 = if_else(year == 1854, 1, 0)) %>%
+  lm(data = ., death ~ LSV + D1854 + D1854:LSV) %>%
+  tidy()
+
+# 4サンプルしかないので標準誤差は出てこない
+print(JS_did)
+```
+
+興味のあるLSV:D54のパラメータは-1554となり、集計分析と同様の結果
+
+これは集計済みデータだったので、未集計の地域別のデータを使ってみる
+
+```{R}
+# areaをモデルに追加
+JS_did_area <- JS_df %>%
+  mutate(D1854 = if_else(year == 1854, 1, 0)) %>%
+  lm(data = ., death ~ LSV + area + D1854 + D1854:LSV) %>%
+  tidy() %>%
+  dplyr::filter(!str_detect(term, "area")) 
+# 地域ごとにどうである等の興味なし、areaのパラメータの推定結果は重要な情報を持たないので削除
+
+print(JS_did_area)
+```
+
+LSV:D54のパラメータは-101 (p_value \< 0.01)となり、水源の変化によって平均100人程度の死者が減少していることが推定されている。
+
+時間による変化なので比率にしたい。ので対数を取ろうで出したのが次
+
+```{R}
+JS_did_area_log <- JS_df %>%
+  mutate(D1854 = if_else(year == 1854, 1, 0)) %>%
+  lm(data = ., log(death) ~ LSV + area + D1854 + D1854:LSV) %>%
+  tidy() %>%
+  filter(!str_detect(term, "area"))
+
+print(JS_did_area_log)
+```
+
+よって効果は-0.56 (-56%) であると示唆された
+
+### 4.1.5 DIDにおける標準誤差
+
+通常の回帰分析では、大まかには１つの観察対象から１つのデータが得られるという想定している\
+一方、DIDの分析は同一の対象からいくつかの期間において取得したデータを利用する\
+このような場合、ある時点で取得された変数の値がその近辺の時間で取得される同じ変数と相関するような状態である **自己相関 (auto-correlation. serial correlation)** を持つデータを得られる可能性がある。
+
+自己相関を持つデータで回帰分析を行った場合、誤差項の値は同一観察対象で似通った値を持つために、誤差項の分散は小さくなる。
+
+回帰分析のパラメータの標準誤差は誤差項の分散を利用するため、自己相関があるために標準誤差が過小に算出されてしまう。つまり統計的に有意になりやすくなる。
+
+なので、**クラスター標準誤差 (cluster standard error)** を利用してパラメータの標準誤差を算出する必要がある\
+この方法はサンプル毎ではなく観察対象毎に誤差項を扱う
+
+Rでは**miceadds**ライブラリの **lm.cluster()** を使用する.使い方は普通の**lm()** と同じ
+
+> [Usage抜粋]
+>
+> lm.cluster(data, formula, cluster, weights=NULL, subset=NULL )\
+> glm.cluster(data, formula, cluster, weights=NULL, subset=NULL, family="gaussian" )
+
+### 4.1.6 平行トレンド仮定 (Common Trend Assumption) と共変量
+
+介入/非介入グループの目的変数の時間を通じた変化が同一であるという仮定\
+コレラの例であれば、Lambeth社が水源を変更していなかった場合、Lambeth社のみが提供の地域とS&V社の両方が提供する地域で同様に死者が増加するという仮定をおいてみる
+
+これは、DIDの分析結果を正しいものと考えるために必要な仮定となる。この仮定が成立しない場合は回帰分析において重要な共変量が脱落した場合に発生するOVBと同様の問題を持ってしまう\
+(といっても現実的な話、仮定であるので明確な傾向はでてこず、判断はできない。結論は分析者に依存してしまう)
+
+仮にトレンドが同一でないと判断できた場合には２つの対策を取ることができる
+
+1.  仮定を満たさないと考えられるデータを取り除く
+2.  共変量としてトレンドの乖離を説明するような変数をモデルに加える
+
+特定の店舗で施策を実施しその効果を測定する場合を例にとると、１はトレンドを揺るがす店舗を除外すること\
+2は駅近や住宅街であるといったダミー変数を加えるなど
+
+DIDで求められる共変量の役割は、各サンプルで値を持つこと。それらが時間によって変化しないこと\
+そんな共変量を見つけられれば良いモデルを作ることができて、モデルの説明能力も向上する
+
+## 4.2 CausalImpact
+
+Bayesian structural time series (BSTS) が内部で用いられている考え方\
+ただ、この本では基本的な考え方と使い方に焦点を当ててさらっと。
+
+### 4.2.1 DIDの欠点
+
+1.  効果の影響を調べたい変数が複数の場所や時期で得られている必要がある
+2.  どのデータを分析に用いるのかが分析者の仮説に依存している
+
+1について、スーパーの売上に対する価格変化の効果を考える際に、売上データは実際に介入が行われた地域以外の、介入がなかった地域/店舗のデータも手に入れる必要がある（非介入データを手に入れる必要がある）\
+2について、並行トレンド仮定を満たす必要があり、介入/非介入グループのトレンドは本質的には同じでなければいけない。この仮定を満たす共変量を見たせるかどうかは分析者のドメイン知識にも大きく影響される
+
+### 4.2.2 CausalImpactのアイデア
+
+**介入が行われたサンプルの”介入が行われなかった場合”の結果**を非介入グループのデータで補う\
+反実仮想の結果を何かしらの方法で予測できるのであれば、そのようなデータから予測してもok\
+実際のデータで得られた値と予測された値の差分が介入の効果として捉えることができる
+
+causalImpactはまず、目的変数Yをうまく予測できるようなモデルを介入が行われる前の期間のみで作成する\
+（ただの予測モデル作成と同じ）\
+その後、介入前のデータを利用してどの変数のデータがYの予測に役立つのかを判別し、自動的に使用する共変量の選定と学習まで行うのがcausalimpact. 学習されたモデルによって、介入後のXによりYを予測して出力、それと観測データの差を効果として取得する
+
+並行トレンド仮定は依然重要である。特徴量の選定は自動でやってくれるが、探して突っ込むのは分析者の役割であるため。
