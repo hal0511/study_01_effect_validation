@@ -195,7 +195,7 @@ print(rdd_lm_reg)
 
 効果は11% (p_value \< 0.01)。RCTの結果に近づいた。線形関係にあるバイアスは取り除けたのだろうって\
 回帰分析による介入効果は介入非介入のサンプルが1対1程度になるようなサンプルを中心に算出される\
-一番多いのがカットオフ周辺なるので、推定されるのはカットオフ周辺の効果(**Local Average Treatment Effect; LATE, 局所平均処置効果**)となってしまう
+一番多いのがカットオフ周辺なるので、推定されるのはカットオフ周辺の効果(**Local Average Treatment Effect; LATE, 局所平均処置効果**)となる
 
 ### 非線形回帰による分析をやってみる
 
@@ -223,4 +223,110 @@ print(nonelinear_rdd_ord4)
 Dが効果量を表しているので7% (p_value \< 0.01) となり、RCTの結果にかなり近づいている。\
 非線形な変数を設定することでセレクションバイアスがかなり小さくなることがわかる
 
+```{R}
+plot(nonelinear_rdd_ord4)
+```
+
 ## nonparametric RDD
+
+利用するデータを閾値の前後に限定することでセレクションバイアスを小さくするアイデア
+
+$$
+\hat{\tau}_{naive} = \tau + E[Y^{(0)}|history \geq A] - E[Y^{(0)}|history < A]
+$$
+
+前述したように、閾値の近くであれば性質が近いので、Aに近ければ近いほどバイアスの影響は小さくなるという特徴がある
+
+横軸に推定に使うデータの範囲を持たせて、縦軸に集計による効果の推定値を示すと以下ようになる\
+(横軸が0.1ならカットオフから最大0.1離れたサンプルのみがデータから得られる結果が縦)
+
+```{R}
+bound_list <- 2:100/100
+result_data <- data.frame()
+for(bound in bound_list){
+  out_data <- rdd_data %>%
+    filter(between(history_log, 5.5 - bound, 5.5 + bound)) %>%
+    group_by(treatment) %>%
+    summarise(count = n(),
+              visit_rate = mean(visit),
+              sd = sd(visit))
+
+  late <- out_data$visit_rate[2] - out_data$visit_rate[1]
+  N <- sum(out_data$count)
+  se <- sqrt(sum(out_data$visit_rate^2))/sqrt(N)
+  result_data <- rbind(result_data, data.frame(late, bound, N, se))
+}
+result_data %>%
+  ggplot(aes(y = late,
+             x = bound)) +
+  geom_ribbon(aes(ymax = late + 1.96*se,
+                  ymin = late - 1.96*se), fill = "grey70") +
+  geom_line() +
+  theme_bw()
+```
+
+範囲を絞れば効果はRCTの時に近づくが、サンプル数が減るため標準誤差が大きくなってしまい、効果量も大きく変動することにな
+
+**rdd::RDestimate**を使うと分析に利用するデータのはばを自動で決めてくれるので便利\
+(クロスバリデーションを応用しているんだと)
+
+```{R}
+library(rdd)
+
+rdd_result <- rdd::RDestimate(
+  data = rdd_data,
+  formula = visit ~ history_log,
+  cutpoint = 5.5
+)
+
+summary(rdd_result)
+```
+
+Estimatesのうち、LATEが興味のある項目でEstimateが効果量を表している(8.2%, p_value \< 0.01)\
+Half_BWとDouble-BWが範囲を半分または２倍にした場合の結果、推定値が大体同じかどうかを確認する
+
+```{R}
+plot(rdd_result)
+```
+
+プロットはこんな感じで、横軸が介入を決定する値(runnig variable)、 縦軸が目的変数の値(ここでは訪問確率)\
+RDDの推定結果はカットオフのとこのシフトしている大きさということになる
+
+## 回帰不連続デザインの仮定
+
+分析手法なのでもちろん満たされるべき仮定があり**Continuity of Conditional Regression Function** がそれ\
+この仮定は、「介入を受けた場合と受けなかった場合における条件付き期待値がXに対して連続である」こと
+
+連続でないとは、今回の場合であればlog(history)が5.5以上のユーザーにメールの配信だけでなく、ネット広告もぶつけるなど。これをやるとネット広告の効果も入ってくるので、メールの効果についての推定が正しく行えない
+
+もう一つ、重要な仮定が**non-manipulation**で、これは分析の対象が自身の介入に関するステータスを調整できないというルール\
+例えば、あるユーザーが一定以上の購入を行うと次年度に使えるクーポンをメールでもらえると知っている場合など\
+あと少し...ってなったらユーザーは意図して追加購入を行うので、ここにカットオフ値を設定すると、カットオフ以上に分布が大きく変化してしまう\
+これは、カットオフ付近のデータ量に注目するとわかる
+
+```{R}
+rdd::DCdensity(
+  runvar = rdd_data$history_log,
+  cutpoint = 5.5,
+  plot = FALSE
+)
+```
+
+p値は0.63なので、ユーザーが自分の意思で介入しているという仮説は棄却。なのでok\
+プロットしてみると↓
+
+```{R}
+rdd::DCdensity(
+  runvar = rdd_data$history_log,
+  cutpoint = 5.5,
+  plot = TRUE
+)
+```
+
+5.5付近にて均等にデータが分布しているのでok
+
+## LATEの妥当性
+
+LATEがカットオフ周辺だけでなく処置効果として考えるためには, 介入の効果がrunning variableによって変化しないという仮定がだいじ。ただ、この仮定の妥当性を判断する方法はないらしく、分析者の判断に委ねられるそう
+
+もし、検証の目的をカットオフの変更に持っているのであれば（=介入の閾値を探っている）LATEの検証はとっても役にたつ
