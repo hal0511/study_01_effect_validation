@@ -1,0 +1,235 @@
+# 4.3 大規模禁煙キャンペーンによるタバコ売上への影響
+
+CausalImpactの分析例として、カリフォルニア州で行われた大規模な禁煙キャンペーンのProposition99がどの程度タバコの消費に影響を与えたのかを推定する（Abadie et al. (2010) らの分析を参考にしている）
+
+Proposition99は1988年から実施された禁煙キャンペーン.\
+まずタバコ一箱に対して25セントの税金をかけ、関連する諸々の予算に当てられた（年間1億ドル程度）\
+このキャンペーンはカリフォルニア州全体で行われていたため、非介入グループを州の中から用意することはできないため、介入が行われなかった場合の状態を推測する必要がある
+
+## 4.3.1 データの準備
+
+カリフォルニア州のタバコの売上を目的変数 $Y_t$ それ以外の州のタバコの売上は $X_{it}$ として使用する\
+分析期間はデータの関係から1970\~1993年とする\
+除外対象の州の条件は1988年以降にタバコに対して一定の水準以上の増税を行った、もしくは何らかの規制をした州あとワシントンD.C.（介入が入っているのと同じ状況であるので）
+
+```{R}
+library('Ecdat')
+
+# タバコの税金が1988年以降に50セント以上上がった州
+# Alaska, Hawaii, Maryland, Michigan, New Jersey, New York, Washington
+# タバコの規制を行っていた州
+# Arizona, Oregon, Florida, Massachusetts
+skip_state <- c(3, 9, 10, 22, 21, 23, 31, 33, 48)
+
+Cigar <- Ecdat::Cigar %>%
+  dplyr::filter(
+    !state %in% skip_state, year >= 70
+  ) %>%
+  mutate(
+    area = if_else(state == 5, 'CA', 'Rest_of_US')
+  )
+```
+
+## 4.3.2 DIDの実装
+
+まずは前後比較
+
+```{R}
+Cigar %>%
+  mutate(
+    period = if_else(year > 87, 'after', 'before'),
+    state = if_else(state == 5, 'CA', 'Rest of US')
+    ) %>%
+  group_by(period, state) %>%
+  summarise(
+    # 16年間の各州の人口あたりのタバコの売上
+    sales = sum(sales * pop16) / sum(pop16)
+    ) %>%
+  spread(state, sales)
+```
+
+```{R}
+Cigar %>%
+  mutate(
+    period = if_else(year > 87, 'after', 'before'),
+    state = if_else(state == 5, 'CA', 'Rest of US')
+    ) %>%
+  group_by(period, state) %>%
+  summarise(
+    sales = sum(sales * pop16) / sum(pop16)
+    ) %>%
+  ggplot(
+    aes(y = sales, x = period, shape = state, linetype = state)
+  ) +
+  geom_point(size = 2) +
+  geom_line(aes(group = state)) +
+  ylim(0, NA) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    plot.margin = margin(1, 1, 1, 1, "cm")
+    ) +
+  scale_x_discrete(name ="Period",limits=c("before","after"))
+```
+
+1970 \~ 1987と1988 \~ 1933の人口1人あたりのタバコの売上を比較すると\
+CAでは45箱程度、それ以外では20箱程度の減少が見られる。この差25箱がProposition99の効果と考えられる
+
+未集計のトレンドだとこんな感じ↓\
+並行トレンド仮定を満たしているか。介入前の部分で並行に動いているわけではないように見える\
+つまりトレンドに差がありそう。（DIDを使用するための仮定を満たせていない）
+
+```{R}
+# 上ではperiodだったので、今度はyearのトレンドで
+Cigar %>%
+  mutate(state = if_else(state == 5, "CA", "Rest of US")) %>%
+  group_by(year, state) %>%
+  summarise(sales = sum(sales * pop16) / sum(pop16)) %>%
+  ggplot(
+    aes(y = sales, x = year, shape = state, linetype = state)
+    ) +
+  geom_line() +
+  geom_point(size = 2) +
+  # 実施された年に点線
+  geom_vline(xintercept = 88, linetype = 4) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    plot.margin = margin(1, 1, 1, 1, "cm")
+    )
+```
+
+でも取り敢えずDIDを試してみる、使用する回帰式は次のものを使う\
+$CA$ はカリフォルニア州であるか否か、$post$ は介入が行われた期間であるか否か,\
+$year$ は各年固有の効果を示す変数であり、$year_{1970, i}$ であればサンプルiに1970年のデータがあれば1、なければ0
+
+$$
+Sales_i = \beta_0 + \beta CA_i + \beta_2 post_i + \beta_3 CA_i \times post_i + \sum_{t=1970}^{T} \gamma_t year_{t,i} + u_i
+$$
+
+formulaの書き方についての参考 ([R入門 formula](https://www.trifields.jp/formula-in-r-7536))
+
+```{R}
+# カリフォルニア州とその他の州の２グループで集計
+Cigar_did_sum <- Cigar %>%
+  mutate(
+    post = if_else(year > 87, 1, 0),
+    ca = if_else(state == 5, 1, 0),
+    state = factor(state), # ファクター型に変換
+    year_dummy = paste('D', year, sep = '_')
+  ) %>%
+  group_by(post, year, year_dummy, ca) %>%
+  summarise(sales = sum(sales * pop16) / sum(pop16))
+
+# 2グループでのデータでの分析
+Cigar_did_sum_reg <- Cigar_did_sum %>%
+  lm(
+    data = .,
+    # 交互作用caかどうか、postかどうかを表現するためca:postを入れている
+    formula = sales ~ ca + post + ca:post + year_dummy
+    ) %>%
+  broom::tidy() %>%
+  dplyr::filter(
+    !str_detect(term, 'state'),
+    !str_detect(term, 'year')
+  )
+
+print(Cigar_did_sum_reg)
+```
+
+介入変数は$ca_i \times post_i$ であることから興味があるのはca:postのパラメータ\
+p_value \< 0.001でestimate -20.5 であるのでProposion99は一人当たり20箱程度減少させたことになる
+
+時間による効果が比率で影響する可能性を考えて目的変数の対数をとったモデルも作る
+
+```{R}
+Cigar_did_sum_log <- Cigar_did_sum %>%
+  lm(
+    data = .,
+    formula = log(sales) ~ ca + post + ca:post + year_dummy
+    ) %>%
+  broom::tidy() %>%
+  dplyr::filter(
+    !str_detect(term, 'state'),
+    !str_detect(term, 'year')
+  )
+
+print(Cigar_did_sum_log)
+```
+
+結果は-25%とでた。（ただし、並行トレンド仮定を満たせていないので確証はできない）
+
+## 4.3.3 CausalImpactの実装
+
+ライブラリは**CausalImpact**を使用\
+CausalImpactに使用する共変量は「並行トレンド仮定を満たすような」変数\
+目的変数はカリフォルニア(state = 5) の sales
+
+```{R}
+# year単位, stateで横持ち, valueにsalesを持つDfを作る
+
+library(CausalImpact)
+
+# CAだけ抜き出す
+Y <- Cigar %>% 
+  dplyr::filter(state == 5) %>% 
+  pull(sales)
+
+# 他の州をyear単位で横持ち変換
+X_sales <- Cigar %>%
+  dplyr::filter(state != 5) %>%
+  # 抜き出すカラムが複数ならpullでなくselect
+  dplyr::select(state, sales, year) %>%
+  spread(state, sales)
+
+# 非介入データを介入前/介入後期間の2つに分ける
+pre_period <- c(1:NROW(X_sales))[X_sales$year < 88]
+post_period <- c(1:NROW(X_sales))[X_sales$year >= 88]
+
+# 目的変数と共変量をくっつける
+CI_data <- cbind(Y, X_sales) %>% dplyr::select(-year)
+
+# CausalImpactによる分析
+impact <- CausalImpact::CausalImpact(
+  data = CI_data,
+  # 何行目から何行目がpre, postか
+  pre.period = c(min(pre_period), max(pre_period)),
+  post.period = c(min(post_period), max(post_period))
+)
+
+print(impact)
+```
+
+Absolute effectは効果を実際の売上箱数で表しており、Averageで平均的な効果, Cumulativeで積み上げ効果\
+それぞれの() の中は標準誤差, 95%信頼区間も書いてあり, ここでは0が含まれるのは5%未満なので有意であると言える
+
+グラフで可視化するとこんな感じ\
+original: CAにおけるタバコの売上とそれに対する予測値を横にとっている（破線が予測値）\
+pointwise: オリジナルと予測の乖離をプロットしたもの、介入の効果を示している\
+cumlative: 介入が始まったタイミングからのpointwise積み上げ
+
+```{R}
+plot(impact)
+```
+
+ちなみに、元となるAbadie et al.(2010) らは合成コントロール手法を用いている
+
+合成コントロールでは、まず各州の経済や人口の状況が介入期間前でカリフォルニア州と類似している州をアルゴリズムによって抽出。この抽出された州はCAと類似したトレンドを持っていることになるので、並行トレンド仮説を満たしていると言える。そして、抽出された州のデータを利用してタバコの売上を合成値として予測するというプロセスを行う。並行トレンド仮説を満たすサンプルを探すプロセスを挟んでいるので、バイアスが十分に低い結果が得られると考えられる
+
+DIDやCausalImpactによる分析は、実験が限定的である環境において非常に重宝される検証方法\
+例えば、地域単位にしか介入が行えない、実験できる地域が限定されているなど\
+あとはA/Bテストが行えない状況や、検証プロセスが組まれていないままに実験が行われていた場合など
+
+最後に、DIDやCausalImpactが使えない状況について
+
+これらは、効果を分析したい介入が他の介入や施策と同時に導入される場合、その効果を分析することはできない\
+例えば、ある広告効果を検証したいとき、広告の開始と同時に商品の値下げを行っている状況\
+この時、正の効果が推定されたとしてもその効果は広告と値下げの両方の効果が混ざってしまうため
+
+ただし、価格が頻繁に変動する場合には、価格を共変量としてモデルに入れることでこの問題は解決できる
+
+アクティビティバイアスってものがある。複数の介入が同時に実施されているとき、個々の介入の効果の推定はできないってこと。実験計画はちゃんと立てようって結論になりますね。
+
+[TJOさんのブログで簡単にコメントされていた](https://tjo.hatenablog.com/entry/2020/01/24/190000)
