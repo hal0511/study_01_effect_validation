@@ -1,0 +1,332 @@
+# 回帰不連続デザイン (RDD)
+
+## 回帰不連続デザインの仕組み
+
+介入が条件文的なルールで割り当てによって決まる場合、介入/非介入では常に傾向が異なるので回帰分析も傾向スコアも使えない。もし、介入前後の情報がない場合はDID/CausalImpactも使えない\
+ただ、条件文の閾値周辺においては傾向が似ているサンプルが集まっているとも考えれ、小規模で限定的なRCTとも捉えられる
+
+介入Zの決定が昨年の売上history (介入を決定させる変数; running variable) に対する閾値(カットオフ)Aよって決定される例だと以下のようにかける。
+
+$$
+Z_i = 
+  \left\{
+    \begin{align}
+      1 &\  (hisotry_i \geq A) \\
+      0 &\  (history_i < A)
+    \end{align}
+  \right.
+$$
+
+このデータの集計による分析の問題点を考える\
+単純な方法だと、配信されたグループと配信されなかったグループでそれぞれ集計しその差をとるのが考えられる\
+$\tau$ が本来推定したい効果、そこに潜在的な購入量の差分がセレクションバイアスとして乗っかってしまっている
+
+$$
+\begin{align}
+  \tau_{naive} &= E[Y^{(1)}|Z=1] - E[Y^{(0)}|Z=0] \\
+               &= \tau + E[Y^{(0)}|Z=1] - E[Y^{(0)}|Z=0] \\
+               &= \tau + E[Y^{(0)}|history \geq A] - E[Y^{(0)}|history < A]
+\end{align}
+$$
+
+去年の購入量と潜在的な購入量には強い相関があると考えるのが普通であるので、このセレクションバイアスは非常に大きいものになり、この集計により得られた分析結果は過剰に評価しているものとなる
+
+## 線形回帰による分析
+
+セレクションバイアスへの対応として一番簡単なのが回帰分析なので、それを考えてみる\
+(メールの配信がサイト訪問を増やすかどうかという目的で行われた仮定を例に取って）
+
+$history_i$ が目的変数であるサイト訪問に対して線形関係を持ち、かつ効果が $history_i$ の値で変動しない状況を考え
+
+$$
+\begin{align}
+  E[Y^{(0)}|X] &= \beta_0 + \beta_1 history \\
+  Y^{(1)} &= Y^{(0)} + \tau
+\end{align}
+$$
+
+母集団に上記のような関係性があるとすると、以下の回帰式で興味のある推定結果を $\tau$ として得ることができる\
+$\rho$ は介入効果を表すパラメータ
+
+$$
+Y = \beta_0 + \beta_1 history + \rho Z + u
+$$
+
+ただし、historyと目的変数の関係が線形でない場合、線形で表現不可なセレクションバイアスが発生することになる
+
+## 非線形回帰による分析
+
+では、非線形な関係がYとhistoryにあるのなら、非線形を考慮した共変量をモデルに含めれば良い\
+それが抜けていると脱落変数バイアスが発生する
+
+この例の場合はXの二乗, 三乗...の問題にして、以下の形の回帰モデルを考える
+
+$$
+\begin{align}
+  f(x) &= \beta_1 X + \beta_2 X^2 + ... + \beta_p X^p \\
+  Y &= \beta_0 + f(x) + \rho Z
+\end{align}
+$$
+
+カットオフ前後でhistoryと介入結果で関係性が変わるなら $Z \times f(x)$ を新たに追加すれば良い
+
+## メールによる来訪率の増加効果を分析する
+
+```{R}
+library(pacman)
+pacman::p_load(
+  readr,
+  tidyverse,
+  broom
+)
+
+# emailデータの読み込み
+email_data <- read_csv("http://www.minethatdata.com/Kevin_Hillstrom_MineThatData_E-MailAnalytics_DataMiningChallenge_2008.03.20.csv")
+
+# データの整形
+male_data <- email_data %>%
+  dplyr::filter(segment %in% c('Mens E-Mail','No E-Mail')) %>%
+  mutate(
+    treatment = if_else(segment == 'Mens E-Mail', 1, 0),
+    history_log = log(history)
+  )
+
+# 一回プロットしてみる
+male_data %>%
+  mutate(history_log_unit = round(history_log, 1)) %>%
+  group_by(history_log_unit, segment) %>%                  
+  summarise(
+    visit_ratio = mean(visit), 
+    count = n(), 
+    .groups = "drop") %>%
+  dplyr::select(history_log_unit, segment, visit_ratio, count) %>%
+  # 少ないのは消す
+  dplyr::filter(count > 10) %>%
+  ggplot(aes(
+    x = history_log_unit, 
+    y = visit_ratio,
+    shape = segment,
+    size = count)) +
+  geom_point() +
+  theme_minimal() +
+  xlab("log(history)") +
+  ylim(0, NA)
+
+```
+
+5付近を境に来訪りつが変わっているように見えるので、線形でないことが見て取れる
+
+RDDの設定をする。カットオフ値を5.5とする(データのもとなった施策を再現）
+
+```{R}
+threshold_value <- 5.5
+
+rdd_data <- male_data %>%
+  mutate(
+    history_log_grp = round(history_log/0.1, 0) * 0.1
+  ) %>%
+  # カットオフよりrunning valueが大きければ配信されたデータのみのこす
+  # カットオフより小さければ配信されなかったデータのみのこす
+  dplyr::filter(
+    (
+     (history_log > threshold_value) & (segment == 'Mens E-Mail')
+    ) | (
+      (history_log <= threshold_value) & (segment == 'No E-Mail')
+    )
+  )
+
+# 先と同じ散布図作成
+rdd_data %>%
+  group_by(history_log_grp, segment) %>%
+  summarise(
+    visit = mean(visit),
+    N = n()) %>%
+  filter(N > 10) %>%
+  ggplot(aes(
+    y = visit,
+    x = history_log_grp,
+    shape = segment,
+    size = N)) +
+  geom_point() +
+  theme_minimal() +
+  ylim(0,NA) +
+  # 閾値をプロット
+  geom_vline(xintercept = 5.5, linetype = 2) +
+  xlab("log(history)")
+```
+
+これでメール配信を仮想的に決定した状態を作り出せた
+
+### では、集計による分析をやってみる
+
+```{R}
+rdd_data_table <- rdd_data %>%
+  group_by(treatment) %>%
+  summarise(
+    count = n(),
+    visit_rate = mean(visit))
+
+print(rdd_data_table)
+```
+
+カットオフ以下の来訪率は9%, カットオフ以上は22%となっているので効果はその差である13%となる\
+(RCTのデータでは効果が8%だったので、想定通り過剰評価されている)
+
+### 回帰分析による分析をやってみる
+
+$$
+visit_i = \beta_0 + \beta_1 treatment_i + \beta_2 log(history_i) + u_i
+$$
+
+```{R}
+rdd_lm_reg <- rdd_data %>%
+  mutate(
+    treatment = if_else(segment == 'Mens E-Mail', 1, 0)
+  ) %>%
+  lm(
+    data = ., 
+     formula = visit ~ treatment + history + history_log
+    ) %>%
+  broom::tidy() %>%
+  dplyr::filter(term == 'treatment')
+
+print(rdd_lm_reg)
+```
+
+効果は11% (p_value \< 0.01)。RCTの結果に近づいた。線形関係にあるバイアスは取り除けたのだろうって\
+回帰分析による介入効果は介入非介入のサンプルが1対1程度になるようなサンプルを中心に算出される\
+一番多いのがカットオフ周辺なるので、推定されるのはカットオフ周辺の効果(**Local Average Treatment Effect; LATE, 局所平均処置効果**)となる
+
+### 非線形回帰による分析をやってみる
+
+**rddtool**を使えば非線形回帰を利用したRDDを簡単に実行できる\
+xがrunning variable、cutpointをカットオフ値を書く\
+rddtools::rdd_reg_lmのorderで多項回帰の項数を指定
+
+```{R}
+library(rddtools)
+
+nonelinear_rdd_data <- rddtools::rdd_data(
+  y = rdd_data$visit,
+  x = rdd_data$history_log,
+  cutpoint = 5.5
+)
+
+nonelinear_rdd_ord4 <- rddtools::rdd_reg_lm(
+  rdd_object = nonelinear_rdd_data,
+  order = 4
+)
+
+print(nonelinear_rdd_ord4)
+```
+
+Dが効果量を表しているので7% (p_value \< 0.01) となり、RCTの結果にかなり近づいている。\
+非線形な変数を設定することでセレクションバイアスがかなり小さくなることがわかる
+
+```{R}
+plot(nonelinear_rdd_ord4)
+```
+
+## nonparametric RDD
+
+利用するデータを閾値の前後に限定することでセレクションバイアスを小さくするアイデア
+
+$$
+\hat{\tau}_{naive} = \tau + E[Y^{(0)}|history \geq A] - E[Y^{(0)}|history < A]
+$$
+
+前述したように、閾値の近くであれば性質が近いので、Aに近ければ近いほどバイアスの影響は小さくなるという特徴がある
+
+横軸に推定に使うデータの範囲を持たせて、縦軸に集計による効果の推定値を示すと以下ようになる\
+(横軸が0.1ならカットオフから最大0.1離れたサンプルのみがデータから得られる結果が縦)
+
+```{R}
+bound_list <- 2:100/100
+result_data <- data.frame()
+for(bound in bound_list){
+  out_data <- rdd_data %>%
+    filter(between(history_log, 5.5 - bound, 5.5 + bound)) %>%
+    group_by(treatment) %>%
+    summarise(count = n(),
+              visit_rate = mean(visit),
+              sd = sd(visit))
+
+  late <- out_data$visit_rate[2] - out_data$visit_rate[1]
+  N <- sum(out_data$count)
+  se <- sqrt(sum(out_data$visit_rate^2))/sqrt(N)
+  result_data <- rbind(result_data, data.frame(late, bound, N, se))
+}
+result_data %>%
+  ggplot(aes(y = late,
+             x = bound)) +
+  geom_ribbon(aes(ymax = late + 1.96*se,
+                  ymin = late - 1.96*se), fill = "grey70") +
+  geom_line() +
+  theme_bw()
+```
+
+範囲を絞れば効果はRCTの時に近づくが、サンプル数が減るため標準誤差が大きくなってしまい、効果量も大きく変動することにな
+
+**rdd::RDestimate**を使うと分析に利用するデータのはばを自動で決めてくれるので便利\
+(クロスバリデーションを応用しているんだと)
+
+```{R}
+library(rdd)
+
+rdd_result <- rdd::RDestimate(
+  data = rdd_data,
+  formula = visit ~ history_log,
+  cutpoint = 5.5
+)
+
+summary(rdd_result)
+```
+
+Estimatesのうち、LATEが興味のある項目でEstimateが効果量を表している(8.2%, p_value \< 0.01)\
+Half_BWとDouble-BWが範囲を半分または２倍にした場合の結果、推定値が大体同じかどうかを確認する
+
+```{R}
+plot(rdd_result)
+```
+
+プロットはこんな感じで、横軸が介入を決定する値(runnig variable)、 縦軸が目的変数の値(ここでは訪問確率)\
+RDDの推定結果はカットオフのとこのシフトしている大きさということになる
+
+## 回帰不連続デザインの仮定
+
+分析手法なのでもちろん満たされるべき仮定があり**Continuity of Conditional Regression Function** がそれ\
+この仮定は、「介入を受けた場合と受けなかった場合における条件付き期待値がXに対して連続である」こと
+
+連続でないとは、今回の場合であればlog(history)が5.5以上のユーザーにメールの配信だけでなく、ネット広告もぶつけるなど。これをやるとネット広告の効果も入ってくるので、メールの効果についての推定が正しく行えない
+
+もう一つ、重要な仮定が**non-manipulation**で、これは分析の対象が自身の介入に関するステータスを調整できないというルール\
+例えば、あるユーザーが一定以上の購入を行うと次年度に使えるクーポンをメールでもらえると知っている場合など\
+あと少し...ってなったらユーザーは意図して追加購入を行うので、ここにカットオフ値を設定すると、カットオフ以上に分布が大きく変化してしまう\
+これは、カットオフ付近のデータ量に注目するとわかる
+
+```{R}
+rdd::DCdensity(
+  runvar = rdd_data$history_log,
+  cutpoint = 5.5,
+  plot = FALSE
+)
+```
+
+p値は0.63なので、ユーザーが自分の意思で介入しているという仮説は棄却。なのでok\
+プロットしてみると↓
+
+```{R}
+rdd::DCdensity(
+  runvar = rdd_data$history_log,
+  cutpoint = 5.5,
+  plot = TRUE
+)
+```
+
+5.5付近にて均等にデータが分布しているのでok
+
+## LATEの妥当性
+
+LATEがカットオフ周辺だけでなく処置効果として考えるためには, 介入の効果がrunning variableによって変化しないという仮定がだいじ。ただ、この仮定の妥当性を判断する方法はないらしく、分析者の判断に委ねられるそう
+
+もし、検証の目的をカットオフの変更に持っているのであれば（=介入の閾値を探っている）LATEの検証はとっても役にたつ
